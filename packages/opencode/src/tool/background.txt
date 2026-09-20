@@ -1,0 +1,15 @@
+Inspect and control the commands that the bash tool is running in the background.
+
+A long command (dev server, watcher, build, test suite, install) can be started with `background: true` on the bash tool, or promoted to the background while it runs. Such a job returns a job id immediately, keeps running while you and the user keep talking, and delivers its output back to you as a message when it finishes.
+
+Actions:
+- `list`: every background job in this workspace with its status, command, and runtime.
+- `get`: one job's status plus the tail of its live output log. Use this only when the user asks how a running command is doing.
+- `cancel`: stop a running job and kill its process.
+- `wait`: wait up to `timeout` milliseconds for a job to finish, then report the same detail as `get`. Use `timeout: 0` to report immediately without waiting.
+
+Rules:
+- Never sleep or poll waiting for a job: the completion message arrives on its own.
+- `wait` blocks the conversation until it returns, so only use it when you truly need a result before deciding the next step; otherwise let the job finish and keep working.
+- Do not cancel a job unless the user asked you to stop it.
+- Prefer letting a job finish; report what you started and continue with other work.

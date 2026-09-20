@@ -1,0 +1,93 @@
+name: publish-npm
+
+# Publishes the openclue CLI to npm: the `openclue` wrapper package that installs
+# the `openclue` command, plus one optional platform package per build target
+# (`openclue-linux-x64`, `openclue-windows-x64`, ...). Platform package names come
+# from packages/opencode/script/build.ts; the wrapper name comes from script/publish.ts.
+#
+# Authentication (input `auth`):
+#   oidc        trusted publishing. No token: the job exchanges the GitHub OIDC
+#               token with npm (needs `id-token: write`, and a trusted publisher
+#               configured per package at npmjs.com or via `npm trust github`).
+#               Requires the package to already exist on the registry.
+#   token       a granular access token from the NPM_TOKEN secret, publishing
+#               directly. Needs "Bypass two-factor authentication" enabled.
+#   token-stage same token but pushes versions through `npm stage publish`; a
+#               maintainer approves each staged version on npmjs.com with 2FA.
+#               This is the supported path for a stage-only token.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish (e.g. 1.18.16-openclue.1)
+        required: true
+        type: string
+      tag:
+        description: npm dist-tag to publish under
+        required: false
+        default: latest
+        type: string
+      auth:
+        description: Authentication mode
+        required: false
+        default: oidc
+        type: choice
+        options:
+          - oidc
+          - token
+          - token-stage
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # `npm stage` and trusted publishing need a newer CLI than the bundled one.
+      - name: Update npm
+        run: npm install -g npm@latest && npm --version
+
+      - name: Install dependencies
+        run: bun install
+
+      # Builds every target in packages/opencode/script/build.ts, including the
+      # baseline and musl variants, into packages/opencode/dist.
+      - name: Build platform binaries
+        working-directory: packages/opencode
+        env:
+          OPENCODE_VERSION: ${{ inputs.version }}
+          OPENCODE_CHANNEL: ${{ inputs.tag }}
+        run: bun run script/build.ts
+
+      # Only the token modes need npm auth on disk; oidc uses the OIDC exchange.
+      - name: Configure npm auth token
+        if: inputs.auth != 'oidc'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::the NPM_TOKEN secret is empty, so the 'token' and 'token-stage' modes cannot authenticate"
+            exit 1
+          fi
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+
+      - name: Publish to npm
+        working-directory: packages/opencode
+        env:
+          OPENCODE_VERSION: ${{ inputs.version }}
+          OPENCODE_CHANNEL: ${{ inputs.tag }}
+          OPENCLUE_PUBLISH_MODE: ${{ inputs.auth == 'token-stage' && 'stage' || 'publish' }}
+          NPM_CONFIG_PROVENANCE: "false"
+        run: bun run script/publish.ts

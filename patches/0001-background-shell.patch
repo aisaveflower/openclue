@@ -1,0 +1,845 @@
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -1,13 +1,16 @@
+-import { Effect, Stream } from "effect"
++import { Effect, Scope, Stream } from "effect"
+ import os from "os"
+ import { createWriteStream } from "node:fs"
+ import * as Tool from "./tool"
+ import path from "path"
+ import { containsPath, type InstanceContext } from "../project/instance-context"
+ import { InstanceState } from "@/effect/instance-state"
+ import { lazy } from "@/util/lazy"
+ import { Language, type Node } from "web-tree-sitter"
++import { BackgroundJob } from "@/background/job"
++import { Identifier } from "@/id/id"
++import type { TaskPromptOps } from "./task"
+ 
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { fileURLToPath } from "url"
+ import { Config } from "@/config/config"
+@@ -80,8 +83,30 @@ type Chunk = {
+   text: string
+   size: number
+ }
+ 
++// Result of a shell command run, including the background job path where the
++// command outlives the tool call that started it. Everything but the command
++// title is optional: a command still running in the background has no exit code
++// or truncated output yet.
++type ShellOutcome = {
++  title: string
++  metadata: {
++    output?: string
++    exit?: number | null
++    truncated?: boolean
++    outputPath?: string
++    log?: string
++    background?: boolean
++    jobId?: string
++    cancelled?: boolean
++    command?: string
++    cwd?: string
++    sessionId?: string
++  }
++  output: string
++}
++
+ const resolveWasm = (asset: string) => {
+   if (asset.startsWith("file://")) return fileURLToPath(asset)
+   if (asset.startsWith("/") || /^[a-z]:/i.test(asset)) return asset
+   const url = new URL(asset, import.meta.url)
+@@ -253,8 +278,32 @@ function tail(text: string, maxLines: number, maxBytes: number) {
+     cut: true,
+   }
+ }
+ 
++function renderJobStarted(input: { jobID: string; command: string; log?: string }) {
++  return [
++    `<shell_job id="${input.jobID}" state="running">`,
++    `<command>${input.command}</command>`,
++    ...(input.log ? [`<log>${input.log}</log>`] : []),
++    "The command is running in the background, so the user can keep talking to you while it works.",
++    "DO NOT sleep, poll, or wait for it: the finished output is delivered back to you automatically as a message.",
++    `Use the background tool with action="get" only when the user asks how it is going, and action="cancel" to stop it.`,
++    "</shell_job>",
++  ].join("\n")
++}
++
++function renderJobResult(input: { jobID: string; command: string; state: string; log?: string; text: string }) {
++  return [
++    `<shell_job id="${input.jobID}" state="${input.state}">`,
++    `<command>${input.command}</command>`,
++    ...(input.log ? [`<log>${input.log}</log>`] : []),
++    "<output>",
++    input.text,
++    "</output>",
++    "</shell_job>",
++  ].join("\n")
++}
++
+ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
+   const tree = yield* Effect.promise(() => parser().then((p) => (ps ? p.ps : p.bash).parse(command)))
+   if (!tree) throw new Error("Failed to parse command")
+   return tree
+@@ -343,8 +392,10 @@ export const ShellTool = Tool.define(
+     const fs = yield* FSUtil.Service
+     const trunc = yield* Truncate.Service
+     const plugin = yield* Plugin.Service
+     const flags = yield* RuntimeFlags.Service
++    const background = yield* BackgroundJob.Service
++    const scope = yield* Scope.Scope
+     const defaultTimeoutMs = flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000
+ 
+     const cygpath = Effect.fn("ShellTool.cygpath")(function* (shell: string, text: string) {
+       const lines = yield* spawner
+@@ -431,8 +482,11 @@ export const ShellTool = Tool.define(
+         command: string
+         cwd: string
+         env: NodeJS.ProcessEnv
+         timeout: number
++        // Pre-created log file. When set, output streams to it from the first byte so
++        // the user (and the `background` tool) can watch a command that is still running.
++        log?: string
+       },
+       ctx: Tool.Context,
+     ) {
+       const limits = yield* trunc.limits()
+@@ -440,10 +494,12 @@ export const ShellTool = Tool.define(
+       let full = ""
+       let last = ""
+       const list: Chunk[] = []
+       let used = 0
+-      let file = ""
+-      let sink: ReturnType<typeof createWriteStream> | undefined
++      let file = input.log ?? ""
++      let sink: ReturnType<typeof createWriteStream> | undefined = input.log
++        ? createWriteStream(input.log, { flags: "a" })
++        : undefined
+       let cut = false
+       let expired = false
+       let aborted = false
+ 
+@@ -481,8 +537,12 @@ export const ShellTool = Tool.define(
+       const code: number | null = yield* Effect.scoped(
+         Effect.gen(function* () {
+           yield* Effect.addFinalizer(closeSink)
+           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
++          // The command can outlive this tool call (background job, or a foreground
++          // command promoted to the background while the user keeps talking), so kill
++          // it whenever this scope closes, including on interrupt from job cancellation.
++          yield* Effect.addFinalizer(() => handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.ignore))
+ 
+           yield* Effect.forkScoped(
+             Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
+               const size = Buffer.byteLength(chunk, "utf-8")
+@@ -588,8 +648,9 @@ export const ShellTool = Tool.define(
+           output: last || preview(output),
+           exit: code,
+           truncated: cut,
+           ...(cut && file ? { outputPath: file } : {}),
++          ...(file ? { log: file } : {}),
+         },
+         output,
+       }
+     })
+@@ -627,18 +688,105 @@ export const ShellTool = Tool.define(
+                   yield* ask(ctx, scan, params)
+                 }),
+               )
+ 
+-              return yield* run(
+-                {
+-                  shell,
+-                  command: params.command,
+-                  cwd,
+-                  env: yield* shellEnv(ctx, cwd),
+-                  timeout,
+-                },
+-                ctx,
++              // Every command is registered as a background job so a long one never
++              // traps the user in a busy session: sending a message promotes the job
++              // (see SessionPrompt.prompt), Ctrl+B does the same from the TUI, and this
++              // tool call then returns a job id instead of holding the conversation
++              // hostage. background=true skips the wait entirely.
++              const jobID = Identifier.ascending("job")
++              const log = yield* trunc.write("")
++              const env = yield* shellEnv(ctx, cwd)
++              // The command outlives this tool call, so it must not listen to the tool
++              // call's abort signal: the SDK fires that signal once the step that asked
++              // for the command finishes, which would kill a healthy background job.
++              // Cancelling the job is what stops the process — Esc aborts the session
++              // (SessionRunState cancels the session's jobs) and the background tool can
++              // cancel one directly; both close the job scope and hit the finalizer.
++              const jobAbort = new AbortController()
++              let outcome: ShellOutcome | undefined
++
++              const ops = ctx.extra?.promptOps as TaskPromptOps | undefined
++              const inject = (state: "completed" | "error", text: string) =>
++                ops
++                  ? ops
++                      .prompt({
++                        sessionID: ctx.sessionID,
++                        agent: ctx.agent,
++                        parts: [
++                          {
++                            type: "text",
++                            synthetic: true,
++                            text: renderJobResult({ jobID, command: params.command, state, log, text }),
++                          },
++                        ],
++                      })
++                      .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }), Effect.asVoid)
++                  : Effect.void
++              const notify = background.wait({ id: jobID }).pipe(
++                Effect.flatMap((waited) => {
++                  if (waited.info?.status === "completed") return inject("completed", waited.info.output ?? "")
++                  if (waited.info?.status === "error") return inject("error", waited.info.error ?? "")
++                  // A cancelled job needs no message: the user interrupted it, or the
++                  // background tool already reported the cancellation.
++                  return Effect.void
++                }),
++              )
++              const jobMetadata = {
++                sessionId: ctx.sessionID,
++                command: params.command,
++                cwd,
++                log,
++              }
++              const started: ShellOutcome = {
++                title: params.command,
++                metadata: { ...jobMetadata, background: true, jobId: jobID },
++                output: renderJobStarted({ jobID, command: params.command, log }),
++              }
++
++              yield* background.start({
++                id: jobID,
++                type: ShellID.ToolID,
++                title: params.command,
++                metadata: { ...jobMetadata, ...(params.background === true ? { background: true } : {}) },
++                onPromote: Effect.gen(function* () {
++                  yield* ctx.metadata({
++                    title: params.command,
++                    metadata: { background: true, jobId: jobID, command: params.command, log },
++                  })
++                  yield* notify.pipe(Effect.forkIn(scope, { startImmediately: true }))
++                }),
++                run: run({ shell, command: params.command, cwd, env, timeout, log }, { ...ctx, abort: jobAbort.signal }).pipe(
++                  Effect.tap((value) =>
++                    Effect.sync(() => {
++                      outcome = value
++                    }),
++                  ),
++                  Effect.map((value) => value.output),
++                ),
++              })
++
++              if (params.background === true) {
++                yield* notify.pipe(Effect.forkIn(scope, { startImmediately: true }))
++                return started
++              }
++
++              const settled = yield* Effect.raceFirst(
++                background.wait({ id: jobID }).pipe(Effect.map((waited) => waited.info)),
++                background.waitForPromotion(jobID),
+               )
++              // Promoted to the background: onPromote already started the notification.
++              if (settled?.metadata?.background === true) return started
++              if (settled?.status === "cancelled") {
++                return {
++                  title: params.command,
++                  metadata: { ...jobMetadata, cancelled: true },
++                  output: "The command was cancelled before it finished.",
++                }
++              }
++              if (!outcome) throw new Error(settled?.error ?? "Command finished without producing output")
++              return outcome
+             }),
+         }
+       })
+   }),
+diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
+--- a/packages/opencode/src/tool/shell/prompt.ts
++++ b/packages/opencode/src/tool/shell/prompt.ts
+@@ -18,8 +18,12 @@ export function parameterSchema() {
+     timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
+     workdir: Schema.optional(Schema.String).annotate({
+       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
+     }),
++    background: Schema.optional(Schema.Boolean).annotate({
++      description:
++        "Run the command in the background and return immediately with a job id. Use this for any command that does not exit on its own (dev servers, watchers, streams) or takes a long time (builds, full test suites, installs). The user can keep talking to you while it runs and you are notified automatically when it finishes.",
++    }),
+   })
+ }
+ 
+ export const Parameters = parameterSchema()
+@@ -217,8 +221,22 @@ Usage notes:
+     cd /d "project\\subdir" && dir
+     </bad-example>`
+ }
+ 
++function backgroundSection() {
++  return `# Commands that keep running (background mode)
++
++Some commands never exit on their own. Those must run in the background so the conversation can continue while they work:
++
++- Set \`background: true\` for dev servers, watchers (\`--watch\`, \`nodemon\`, \`vite\`), log or stream readers, REPLs, full test suites, long builds, and large installs.
++- A background command returns immediately with a job id. The user keeps talking with you while it runs, and the finished output is delivered back to you automatically as a message.
++- Do NOT fake backgrounding with \`&\`, \`Start-Job\`, \`Start-Process\`, or \`nohup\`: those leak an unmanaged process and hide its output. Use \`background: true\` instead.
++- Do NOT attach a long timeout to a command that does not exit, and do NOT sleep, poll, or repeatedly check a running job. Continue with other work, or answer the user, and let the completion message arrive.
++- Use the \`background\` tool only when the user asks how a running command is doing (\`action: "get"\`) or wants it stopped (\`action: "cancel"\`).
++- Keep foreground commands for work whose output you need before deciding the next step. Any foreground command that is still running when the user sends a new message is promoted to the background automatically, so a blocking foreground command stalls the user's next message until it finishes.
++- A background command is killed when the user interrupts the session, or when you cancel its job.`
++}
++
+ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number) {
+   const isPowerShell = PS.has(name)
+   const chain = chainGuidance(name)
+   if (CMD.has(name)) {
+@@ -279,8 +297,9 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits,
+       shell: name,
+       tmp: Global.Path.tmp,
+       workdirSection: selected.workdirSection,
+       commandSection: selected.commandSection,
++      backgroundSection: backgroundSection(),
+       gitCommands: selected.gitCommands,
+       toolName: ShellID.ToolID,
+       gitCommandRestriction: selected.gitCommandRestriction,
+       createPrInstruction: selected.createPrInstruction,
+diff --git a/packages/opencode/src/tool/shell/shell.txt b/packages/opencode/src/tool/shell/shell.txt
+--- a/packages/opencode/src/tool/shell/shell.txt
++++ b/packages/opencode/src/tool/shell/shell.txt
+@@ -9,8 +9,10 @@ Use `${tmp}` for temporary work outside the workspace. This directory has alread
+ IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+ 
+ ${commandSection}
+ 
++${backgroundSection}
++
+ # Git and GitHub
+ - Only commit, amend, push, or create PRs when explicitly requested.
+ - Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.
+ - Write a concise commit message that matches the repo style.
+diff --git a/packages/opencode/src/tool/background.ts b/packages/opencode/src/tool/background.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/tool/background.ts
+@@ -0,0 +1,161 @@
++import DESCRIPTION from "./background.txt"
++import * as Tool from "./tool"
++import { Effect, Schema } from "effect"
++import { open } from "node:fs/promises"
++import { BackgroundJob } from "@/background/job"
++import { ShellID } from "./shell/id"
++
++const id = "background"
++
++const TAIL_BYTES = 8 * 1024
++const DEFAULT_WAIT_MS = 30_000
++
++const Parameters = Schema.Struct({
++  action: Schema.Literals(["list", "get", "cancel", "wait"]).annotate({
++    description: "list every background job, get one job's status and live output, cancel a running job, or wait for one to finish",
++  }),
++  job_id: Schema.optional(Schema.String).annotate({
++    description: 'Job id returned by the bash tool. Required for action="get", "cancel", and "wait".',
++  }),
++  timeout: Schema.optional(Schema.Number).annotate({
++    description: `For action="wait": milliseconds to wait before reporting progress. Defaults to ${DEFAULT_WAIT_MS}.`,
++  }),
++})
++
++// Every branch below reports through this shape. Declaring it once keeps the tool
++// metadata a single type instead of a union of per-branch literals.
++type BackgroundMetadata = {
++  count?: number
++  running?: number
++  jobs?: string[]
++  jobId?: string
++  status?: BackgroundJob.Status
++  timedOut?: boolean
++}
++
++export const BackgroundTool = Tool.define<typeof Parameters, BackgroundMetadata, BackgroundJob.Service, "background">(
++  id,
++  Effect.gen(function* () {
++    const background = yield* BackgroundJob.Service
++
++    const run = Effect.fn("BackgroundTool.execute")(function* (
++      params: Schema.Schema.Type<typeof Parameters>,
++      ctx: Tool.Context,
++    ) {
++      if (params.action === "list") {
++        const jobs = yield* background.list()
++        const running = jobs.filter((job) => job.status === "running")
++        // Completed jobs accumulate for the life of the workspace, so keep the output
++        // focused on live work and the most recent history.
++        const finished = jobs.filter((job) => job.status !== "running").slice(-10)
++        const visible = [...running, ...finished]
++        return {
++          title: `Background jobs (${jobs.length})`,
++          metadata: { count: jobs.length, running: running.length, jobs: visible.map((job) => job.id) },
++          output: visible.length
++            ? [
++                ...visible.map((job) => renderJob(job)),
++                ...(visible.length < jobs.length
++                  ? [`(${jobs.length - visible.length} older finished job(s) omitted)`]
++                  : []),
++              ].join("\n")
++            : "No background commands have been started in this workspace.",
++        }
++      }
++
++      const jobID = params.job_id
++      if (!jobID) return yield* Effect.fail(new Error(`job_id is required for action="${params.action}"`))
++      const job = yield* background.get(jobID)
++      if (!job) return yield* Effect.fail(new Error(`Unknown background job: ${jobID}`))
++
++      if (params.action === "cancel") {
++        const command = typeof job.metadata?.command === "string" ? job.metadata.command : jobID
++        if (job.status !== "running") {
++          return {
++            title: job.title ?? jobID,
++            metadata: { jobId: jobID, status: job.status },
++            output: `${renderJobDetail(job, undefined, false)}\n\nThe job already finished, so there was nothing to cancel.`,
++          }
++        }
++        yield* ctx.ask({
++          permission: ShellID.ToolID,
++          patterns: [command],
++          always: [],
++          metadata: { command, job_id: jobID },
++        })
++        const cancelled = (yield* background.cancel(jobID)) ?? job
++        return {
++          title: cancelled.title ?? jobID,
++          metadata: { jobId: jobID, status: cancelled.status },
++          output: `${renderJobDetail(cancelled, yield* readLogTail(cancelled), false)}\n\nThe job was cancelled and its process was killed.`,
++        }
++      }
++
++      const waited =
++        params.action === "wait"
++          ? yield* background.wait({ id: jobID, timeout: params.timeout ?? DEFAULT_WAIT_MS })
++          : { info: job, timedOut: false }
++      const info = waited.info ?? job
++      return {
++        title: info.title ?? jobID,
++        metadata: { jobId: jobID, status: info.status, ...(waited.timedOut ? { timedOut: true } : {}) },
++        output: renderJobDetail(info, yield* readLogTail(info), waited.timedOut),
++      }
++    })
++
++    return {
++      description: DESCRIPTION,
++      parameters: Parameters,
++      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
++        run(params, ctx).pipe(Effect.orDie),
++    }
++  }),
++)
++
++function runtime(job: BackgroundJob.Info) {
++  const seconds = Math.max(0, Math.round(((job.completed_at ?? Date.now()) - job.started_at) / 1000))
++  return `${seconds}s`
++}
++
++function renderJob(job: BackgroundJob.Info) {
++  const command = typeof job.metadata?.command === "string" ? job.metadata.command : job.title ?? job.type
++  return `- ${job.id} [${job.status}] ${runtime(job)} — ${command}`
++}
++
++function renderJobDetail(job: BackgroundJob.Info, tail: string | undefined, timedOut: boolean) {
++  const command = typeof job.metadata?.command === "string" ? job.metadata.command : job.title ?? job.type
++  const log = typeof job.metadata?.log === "string" ? job.metadata.log : undefined
++  const output = tail?.trim() ? tail.trim() : job.output?.trim()
++  return [
++    `job: ${job.id}`,
++    `status: ${job.status}${job.status === "running" && timedOut ? " (still running)" : ""}`,
++    `command: ${command}`,
++    `runtime: ${runtime(job)}`,
++    ...(log ? [`log: ${log}`] : []),
++    ...(job.error ? [`error: ${job.error}`] : []),
++    "",
++    output ? `${job.status === "running" ? "output so far" : "output"}:\n${output}` : "output: (nothing yet)",
++  ].join("\n")
++}
++
++// Live logs are the running job's raw stdout/stderr, so read only the tail instead
++// of loading a dev server's entire history into context.
++function readLogTail(job: BackgroundJob.Info) {
++  const file = job.metadata?.log
++  return Effect.promise(async () => {
++    if (typeof file !== "string") return undefined
++    const handle = await open(file, "r").catch(() => undefined)
++    if (!handle) return undefined
++    const stat = await handle.stat().catch(() => undefined)
++    if (!stat || stat.size <= 0) {
++      await handle.close().catch(() => undefined)
++      return undefined
++    }
++    const size = Math.min(TAIL_BYTES, stat.size)
++    const buffer = Buffer.alloc(size)
++    const result = await handle.read(buffer, 0, size, stat.size - size).catch(() => undefined)
++    await handle.close().catch(() => undefined)
++    if (!result || result.bytesRead <= 0) return undefined
++    return buffer.subarray(0, result.bytesRead).toString("utf-8")
++  })
++}
+diff --git a/packages/opencode/src/tool/background.txt b/packages/opencode/src/tool/background.txt
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/tool/background.txt
+@@ -0,0 +1,15 @@
++Inspect and control the commands that the bash tool is running in the background.
++
++A long command (dev server, watcher, build, test suite, install) can be started with `background: true` on the bash tool, or promoted to the background while it runs. Such a job returns a job id immediately, keeps running while you and the user keep talking, and delivers its output back to you as a message when it finishes.
++
++Actions:
++- `list`: every background job in this workspace with its status, command, and runtime.
++- `get`: one job's status plus the tail of its live output log. Use this only when the user asks how a running command is doing.
++- `cancel`: stop a running job and kill its process.
++- `wait`: wait up to `timeout` milliseconds for a job to finish, then report the same detail as `get`. Use `timeout: 0` to report immediately without waiting.
++
++Rules:
++- Never sleep or poll waiting for a job: the completion message arrives on its own.
++- `wait` blocks the conversation until it returns, so only use it when you truly need a result before deciding the next step; otherwise let the job finish and keep working.
++- Do not cancel a job unless the user asked you to stop it.
++- Prefer letting a job finish; report what you started and continue with other work.
+diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
+--- a/packages/opencode/src/tool/registry.ts
++++ b/packages/opencode/src/tool/registry.ts
+@@ -9,8 +9,9 @@ import { EditTool } from "./edit"
+ import { GlobTool } from "./glob"
+ import { GrepTool } from "./grep"
+ import { ReadTool } from "./read"
+ import { TaskTool } from "./task"
++import { BackgroundTool } from "./background"
+ import { Database } from "@opencode-ai/core/database/database"
+ import { TodoWriteTool } from "./todo"
+ import { WebFetchTool } from "./webfetch"
+ import { WriteTool } from "./write"
+@@ -108,8 +109,9 @@ const layer = Layer.effect(
+     const edit = yield* EditTool
+     const greptool = yield* GrepTool
+     const patchtool = yield* ApplyPatchTool
+     const skilltool = yield* SkillTool
++    const backgroundtool = yield* BackgroundTool
+     const agent = yield* Agent.Service
+     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
+     const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
+ 
+@@ -203,8 +205,9 @@ const layer = Layer.effect(
+ 
+         const tool = yield* Effect.all({
+           invalid: Tool.init(invalid),
+           shell: Tool.init(shell),
++          background: Tool.init(backgroundtool),
+           read: Tool.init(read),
+           glob: Tool.init(globtool),
+           grep: Tool.init(greptool),
+           edit: Tool.init(edit),
+@@ -226,8 +229,9 @@ const layer = Layer.effect(
+           builtin: [
+             tool.invalid,
+             ...(questionEnabled ? [tool.question] : []),
+             tool.shell,
++            tool.background,
+             tool.read,
+             tool.glob,
+             tool.grep,
+             tool.edit,
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -54,8 +54,9 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { eq } from "drizzle-orm"
+ import { SessionTable } from "@opencode-ai/core/session/sql"
+ import { SessionReminders } from "./reminders"
+ import { SessionTools } from "./tools"
++import { BackgroundJob } from "@/background/job"
+ import { LLMEvent } from "@opencode-ai/llm"
+ 
+ // @ts-ignore
+ globalThis.AI_SDK_LOG_WARNINGS = false
+@@ -139,8 +140,9 @@ const layer = Layer.effect(
+     const llm = yield* LLM.Service
+     const events = yield* EventV2Bridge.Service
+     const flags = yield* RuntimeFlags.Service
+     const database = yield* Database.Service
++    const background = yield* BackgroundJob.Service
+     const { db } = database
+     const ops = Effect.fn("SessionPrompt.ops")(function* () {
+       return {
+         cancel: (sessionID: SessionID) => cancel(sessionID),
+@@ -1048,15 +1050,38 @@ const layer = Layer.effect(
+ 
+       return { info, parts }
+     }, Effect.scoped)
+ 
++    // Commands the bash tool started in the foreground block the session until they
++    // exit. Promoting them on new user input keeps the conversation live: the tool
++    // call returns a job id, the command keeps running, and its output comes back as
++    // its own message. Jobs that already run in the background are left alone.
++    const promoteShellJobs = Effect.fn("SessionPrompt.promoteShellJobs")(function* (sessionID: SessionID) {
++      const jobs = yield* background.list()
++      yield* Effect.forEach(
++        jobs.filter(
++          (job) =>
++            job.status === "running" &&
++            job.type === ShellID.ToolID &&
++            job.metadata?.background !== true &&
++            job.metadata?.sessionId === sessionID,
++        ),
++        (job) => background.promote(job.id).pipe(Effect.ignore),
++        { concurrency: "unbounded", discard: true },
++      )
++    })
++
+     const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
+       "SessionPrompt.prompt",
+     )(function* (input: PromptInput) {
+       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+       yield* revert.cleanup(session)
+       const message = yield* createUserMessage(input)
+       yield* sessions.touch(input.sessionID)
++      // A shell command can hold the session busy for minutes. When the user talks to
++      // a busy session, move its running commands to the background so the message is
++      // answered now and the command keeps going; its output arrives as its own message.
++      yield* promoteShellJobs(input.sessionID)
+ 
+       const permissions: PermissionV1.Rule[] = []
+       for (const [t, enabled] of Object.entries(input.tools ?? {})) {
+         permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
+@@ -1624,8 +1649,9 @@ export const node = LayerNode.make({
+     LLM.node,
+     EventV2Bridge.node,
+     RuntimeFlags.node,
+     Database.node,
++    BackgroundJob.node,
+   ],
+ })
+ 
+ export * as SessionPrompt from "./prompt"
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -15,8 +15,9 @@ import { Agent } from "../../src/agent/agent"
+ import { Truncate } from "@/tool/truncate"
+ import { SessionID, MessageID } from "../../src/session/schema"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
++import { BackgroundJob } from "../../src/background/job"
+ import { Plugin } from "../../src/plugin"
+ import { testEffect } from "../lib/effect"
+ import { Tool } from "@/tool/tool"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+@@ -31,8 +32,9 @@ const shellLayer = Layer.mergeAll(
+       Truncate.node,
+       Config.node,
+       Agent.node,
+       RuntimeFlags.node,
++      BackgroundJob.node,
+     ]),
+   ),
+   testInstanceStoreLayer,
+ )
+diff --git a/packages/opencode/test/tool/shell-background.test.ts b/packages/opencode/test/tool/shell-background.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/tool/shell-background.test.ts
+@@ -0,0 +1,192 @@
++import { describe, expect } from "bun:test"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { Effect, Fiber, Layer } from "effect"
++import { Shell } from "@opencode-ai/core/shell"
++import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { ShellTool } from "../../src/tool/shell"
++import { BackgroundTool } from "../../src/tool/background"
++import { BackgroundJob } from "../../src/background/job"
++import { Config } from "@/config/config"
++import { Agent } from "../../src/agent/agent"
++import { Truncate } from "@/tool/truncate"
++import { Plugin } from "../../src/plugin"
++import { RuntimeFlags } from "@/effect/runtime-flags"
++import { SessionID, MessageID } from "../../src/session/schema"
++import { provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
++import { pollWithTimeout, testEffect } from "../lib/effect"
++
++const shellLayer = Layer.mergeAll(
++  LayerNode.compile(
++    LayerNode.group([
++      CrossSpawnSpawner.node,
++      FSUtil.node,
++      Plugin.node,
++      Truncate.node,
++      Config.node,
++      Agent.node,
++      RuntimeFlags.node,
++      BackgroundJob.node,
++    ]),
++  ),
++  testInstanceStoreLayer,
++)
++const it = testEffect(shellLayer)
++
++const initShell = Effect.fn("ShellBackgroundTest.init")(function* () {
++  const info = yield* ShellTool
++  return yield* info.init()
++})
++
++const initBackground = Effect.fn("ShellBackgroundTest.initBackground")(function* () {
++  const info = yield* BackgroundTool
++  return yield* info.init()
++})
++
++const ctx = {
++  sessionID: SessionID.make("ses_test"),
++  messageID: MessageID.make("msg_test"),
++  callID: "",
++  agent: "build",
++  abort: AbortSignal.any([]),
++  messages: [],
++  metadata: () => Effect.void,
++  ask: () => Effect.void,
++}
++
++Shell.acceptable.reset()
++const quote = (text: string) => `"${text}"`
++const squote = (text: string) => `'${text}'`
++const bin = quote(process.execPath.replaceAll("\\", "/"))
++const sh = () => Shell.name(Shell.acceptable())
++const command = (code: string) => {
++  const text = `${bin} -e ${sh() === "cmd" ? quote(code) : squote(code)}`
++  return sh() === "pwsh" || sh() === "powershell" ? `& ${text}` : text
++}
++const echo = () => command("console.log(11235813)")
++const sleep = () => command("setTimeout(()=>{},30000)")
++
++const runIn = <A, E, R>(directory: string, self: Effect.Effect<A, E, R>) => self.pipe(provideInstance(directory))
++const metadata = (result: { metadata: unknown }) => result.metadata as Record<string, unknown>
++
++describe("tool.shell background", () => {
++  it.live("returns immediately with a job id and delivers the output later", () =>
++    Effect.gen(function* () {
++      const tmp = yield* tmpdirScoped()
++      yield* runIn(
++        tmp,
++        Effect.gen(function* () {
++          const shell = yield* initShell()
++          const jobs = yield* BackgroundJob.Service
++
++          const result = yield* shell.execute({ command: echo(), background: true }, ctx)
++
++          expect(metadata(result).background).toBe(true)
++          const jobID = String(metadata(result).jobId)
++          expect(jobID.startsWith("job_")).toBe(true)
++          expect(result.output).toContain(jobID)
++          expect(result.output).toContain("running in the background")
++
++          const waited = yield* jobs.wait({ id: jobID, timeout: 20000 })
++          expect(waited.timedOut).toBe(false)
++          expect(waited.info?.status).toBe("completed")
++          expect(waited.info?.output).toContain("11235813")
++        }),
++      )
++    }),
++  )
++
++  it.live("promotes a running foreground command so the tool call returns a job id", () =>
++    Effect.gen(function* () {
++      const tmp = yield* tmpdirScoped()
++      yield* runIn(
++        tmp,
++        Effect.gen(function* () {
++          const shell = yield* initShell()
++          const jobs = yield* BackgroundJob.Service
++
++          const call = yield* shell.execute({ command: sleep() }, ctx).pipe(Effect.forkChild)
++          const running = yield* pollWithTimeout(
++            jobs.list().pipe(Effect.map((all) => all.find((job) => job.status === "running"))),
++            "shell command never registered a running job",
++          )
++
++          yield* jobs.promote(running.id)
++
++          const result = yield* Fiber.join(call)
++          expect(metadata(result).background).toBe(true)
++          expect(metadata(result).jobId).toBe(running.id)
++
++          const still = yield* jobs.wait({ id: running.id, timeout: 0 })
++          expect(still.timedOut).toBe(true)
++          expect(still.info?.status).toBe("running")
++
++          yield* jobs.cancel(running.id)
++          const cancelled = yield* jobs.get(running.id)
++          expect(cancelled?.status).toBe("cancelled")
++        }),
++      )
++    }),
++  )
++
++  it.live("keeps running after the tool call aborts its own signal", () =>
++    Effect.gen(function* () {
++      const tmp = yield* tmpdirScoped()
++      yield* runIn(
++        tmp,
++        Effect.gen(function* () {
++          const shell = yield* initShell()
++          const jobs = yield* BackgroundJob.Service
++          const controller = new AbortController()
++
++          const result = yield* shell.execute({ command: sleep(), background: true }, {
++            ...ctx,
++            abort: controller.signal,
++          })
++          const jobID = String(metadata(result).jobId)
++
++          // The SDK aborts a tool call's signal once the step that requested the command
++          // finishes; a command that already moved to the background must ignore that and
++          // keep running until its job is cancelled.
++          controller.abort()
++          yield* Effect.sleep("1 seconds")
++
++          const still = yield* jobs.wait({ id: jobID, timeout: 0 })
++          expect(still.timedOut).toBe(true)
++          expect(still.info?.status).toBe("running")
++
++          yield* jobs.cancel(jobID)
++          expect((yield* jobs.get(jobID))?.status).toBe("cancelled")
++        }),
++      )
++    }),
++  )
++
++  it.live("reports a running job with its live output through the background tool", () =>
++    Effect.gen(function* () {
++      const tmp = yield* tmpdirScoped()
++      yield* runIn(
++        tmp,
++        Effect.gen(function* () {
++          const shell = yield* initShell()
++          const background = yield* initBackground()
++          const jobs = yield* BackgroundJob.Service
++
++          const result = yield* shell.execute({ command: sleep(), background: true }, ctx)
++          const jobID = String(metadata(result).jobId)
++
++          const status = yield* background.execute({ action: "get", job_id: jobID }, ctx)
++          expect(status.output).toContain(`job: ${jobID}`)
++          expect(status.output).toContain("status: running")
++
++          const listed = yield* background.execute({ action: "list" }, ctx)
++          expect(listed.output).toContain(jobID)
++
++          const cancelled = yield* background.execute({ action: "cancel", job_id: jobID }, ctx)
++          expect(cancelled.output).toContain("was cancelled")
++          expect((yield* jobs.get(jobID))?.status).toBe("cancelled")
++        }),
++      )
++    }),
++  )
++})
