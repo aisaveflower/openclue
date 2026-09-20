@@ -1,0 +1,36 @@
+name: OpenClue CI
+
+on:
+  push:
+    branches: [openclue, main]
+  pull_request:
+    branches: [openclue, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-cli:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun typecheck
+        working-directory: packages/core
+      - run: bun test test/plugin/mulitagent.test.ts test/plugin/plan.test.ts
+        working-directory: packages/core
+      - run: bun typecheck
+        working-directory: packages/cli
+      - run: bun test test/updater-install.test.ts
+        working-directory: packages/cli
+      - run: bun run script/build.ts --single --skip-web-ui
+        working-directory: packages/cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openclue-windows-x64
+          path: packages/cli/dist/openclue-windows-x64

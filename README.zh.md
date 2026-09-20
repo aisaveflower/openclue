@@ -1,128 +1,75 @@
-<p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">开源的 AI Coding Agent。</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
+# OpenClue
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
+OpenClue 是一个完整、独立的 AI 编程代理，基于 OpenCode v2.0.10。它的核心新增能力是 **Mulitagent** 模式：收到一个请求后，先自动设计多条真正不同的实现路径，再让多个隔离的代理并行完成实际编码和测试，最后由主代理比较、择优或合并，并把最终方案落实到用户原始工作区。
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+> 本仓库是 OpenClue 的完整源码，不是补丁包、插件或必须覆盖到 OpenCode 源码上的文件集合。
 
----
+[English](README.md)
 
-### 安装
+## Mulitagent 模式
 
-```bash
-# 直接安装 (YOLO)
-curl -fsSL https://opencode.ai/install | bash
+在 TUI 中按 `Tab` 或 `Shift+Tab`，可以在三个主模式之间切换：
 
-# 软件包管理器
-npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS 和 Linux（推荐，始终保持最新）
-brew install opencode              # macOS 和 Linux（官方 brew formula，更新频率较低）
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # 任意系统
-nix run nixpkgs#opencode           # 或用 github:anomalyco/opencode 获取最新 dev 分支
+- **Build**：标准实现模式。
+- **Plan**：只读规划与代码探索模式。
+- **Mulitagent**：全自动并行实现模式。
+
+每次收到请求后，Mulitagent 会：
+
+1. 根据并行数量设计 N 个有实质差异的实现方法。
+2. 为每种方法创建独立 Git worktree。
+3. 同时启动 N 个实现代理。
+4. 要求每个代理真正修改代码并执行验证，而不是只给建议。
+5. 将各实现的报告和 diff 交给主代理，由主代理择优或合并，应用到原始工作区并再次验证。
+
+Mulitagent 不会向用户追问；遇到不确定内容时会自行做合理假设并继续完成任务。
+
+默认并行代理数为 3，可在 `opencode.json` 或 `opencode.jsonc` 中配置为 1–8：
+
+```json
+{
+  "experimental": {
+    "mulitagent_agents": 3
+  }
+}
 ```
 
-> [!TIP]
-> 安装前请先移除 0.1.x 之前的旧版本。
+`mulitagent` 的拼写是有意保留的正式模式名和配置名。
 
-### 桌面应用程序 (BETA)
+## 安装
 
-OpenCode 也提供桌面版应用。可直接从 [发布页 (releases page)](https://github.com/anomalyco/opencode/releases) 或 [opencode.ai/download](https://opencode.ai/download) 下载。
-
-| 平台                  | 下载文件                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`、`.rpm` 或 AppImage         |
+npm 版本发布后：
 
 ```bash
-# macOS (Homebrew Cask)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
+npm install --global openclue
+openclue
 ```
 
-#### 安装目录
+OpenClue 可以和 OpenCode 同时安装：命令分别是 `openclue` 与 `opencode`，全局数据、缓存、配置、状态和临时目录也相互独立。为兼容原有生态，OpenClue 仍会读取项目中的 `.opencode` 目录以及 `opencode.json(c)`。
 
-安装脚本按照以下优先级决定安装路径：
+## 从源码构建
 
-1. `$OPENCODE_INSTALL_DIR` - 自定义安装目录
-2. `$XDG_BIN_DIR` - 符合 XDG 基础目录规范的路径
-3. `$HOME/bin` - 如果存在或可创建的用户二进制目录
-4. `$HOME/.opencode/bin` - 默认备用路径
+需要 Git，以及 Bun 1.3.14 或更新版本：
 
 ```bash
-# 示例
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
+git clone https://github.com/aisaveflower/openclue.git
+cd openclue
+bun install
+bun run --cwd packages/cli build --single
 ```
 
-### Agents
+原生包输出到 `packages/cli/dist/openclue-<platform>-<arch>/`。也可以直接从源码运行：
 
-OpenCode 内置两种 Agent，可用 `Tab` 键快速切换：
+```bash
+bun run --cwd packages/cli dev
+```
 
-- **build** - 默认模式，具备完整权限，适合开发工作
-- **plan** - 只读模式，适合代码分析与探索
-  - 默认拒绝修改文件
-  - 运行 bash 命令前会询问
-  - 便于探索未知代码库或规划改动
+## 版本与来源
 
-另外还包含一个 **general** 子 Agent，用于复杂搜索和多步任务，内部使用，也可在消息中输入 `@general` 调用。
+当前源码版本为 `2.0.10-openclue.1`，上游基线为 OpenCode `v2.0.10`。后续 OpenClue 功能直接在本仓库继续迭代，不需要再下载 OpenCode 后应用补丁。
 
-了解更多 [Agents](https://opencode.ai/docs/agents) 相关信息。
+OpenClue 是 [OpenCode](https://github.com/anomalyco/opencode) 的独立非官方分支，与 OpenCode 团队没有隶属、背书或支持关系。部分内部包名、协议和环境变量继续保留 OpenCode 名称，以维持上游兼容性。
 
-### 文档
+## 许可证
 
-更多配置说明请查看我们的 [**官方文档**](https://opencode.ai/docs)。
-
-### 参与贡献
-
-如有兴趣贡献代码，请在提交 PR 前阅读 [贡献指南 (Contributing Docs)](./CONTRIBUTING.md)。
-
-### 基于 OpenCode 进行开发
-
-如果你在项目名中使用了 “opencode”（如 “opencode-dashboard” 或 “opencode-mobile”），请在 README 里注明该项目不是 OpenCode 团队官方开发，且不存在隶属关系。
-
----
-
-**加入我们的社区** [飞书](https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=52ao9352-5623-4fa0-b7dd-3407c392c1af&qr_code=true) | [X.com](https://x.com/opencode)
+OpenClue 使用 MIT License。详见 [LICENSE](LICENSE) 与 [NOTICE.md](NOTICE.md)。

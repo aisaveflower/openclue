@@ -1,12 +1,11 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@opencode/cli",
-  "version": "2.0.10",
+  "version": "2.0.10-openclue.1",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "opencode": "./bin/opencode.cjs",
-    "opencode2": "./bin/opencode2.cjs"
+    "openclue": "./bin/openclue.cjs"
   },
   "files": [
     "bin"

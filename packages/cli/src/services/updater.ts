@@ -48,7 +48,6 @@ const make = Effect.gen(function* () {
   const global = yield* Global.Service
   const appProcess = yield* AppProcess.Service
   const installedVersion = yield* Ref.make(OPENCODE_VERSION)
-  const channel = OPENCODE_CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")
   const installedPackage = yield* Effect.gen(function* () {
     const executable = yield* fs.realPath(process.execPath)
     const directory = path.dirname(path.dirname(executable))
@@ -56,13 +55,13 @@ const make = Effect.gen(function* () {
       .readFileString(path.join(directory, "package.json"))
       .pipe(Effect.flatMap((text) => Effect.try(() => JSON.parse(text))))
     // Source invocations run inside Bun or Node, which may themselves be npm packages.
-    if (!/^@opencode(?:-ai)?\/cli(?:-node)?$/.test(manifest.name)) return
+    if (manifest.name !== "openclue") return
     if (Object.values(manifest.bin ?? {}).some((bin) => path.resolve(directory, bin) === executable))
       return manifest.name
   }).pipe(Effect.orElseSucceed(() => undefined))
 
   const readPolicy = Effect.fnUntraced(function* () {
-    const values = yield* Effect.forEach(["config.json", "opencode.json", "opencode.jsonc"], (name) =>
+    const values = yield* Effect.forEach(["config.json", "openclue.json", "openclue.jsonc", "opencode.json", "opencode.jsonc"], (name) =>
       fs.readFileString(path.join(global.config, name)).pipe(
         Effect.map(decodePolicy),
         Effect.orElseSucceed(() => undefined),
@@ -91,9 +90,9 @@ const make = Effect.gen(function* () {
   const method = Effect.fnUntraced(function* () {
     const binary = path.join(
       global.home,
-      ".opencode",
+      ".openclue",
       "bin",
-      process.platform === "win32" ? "opencode.exe" : "opencode",
+      process.platform === "win32" ? "openclue.exe" : "openclue",
     )
     if (path.resolve(process.execPath) === path.resolve(binary)) return "curl"
     const executable = yield* fs.realPath(process.execPath).pipe(Effect.orElseSucceed(() => process.execPath))
@@ -140,25 +139,21 @@ const make = Effect.gen(function* () {
     }
   }
 
-  const release = Effect.fnUntraced(function* (method?: Method) {
-    const distribution = method === "brew" ? "homebrew" : "npm"
+  const release = Effect.fnUntraced(function* (_method?: Method) {
     const response = yield* Effect.tryPromise({
       try: (signal) =>
-        fetch(
-          `https://opencode.ai/update/api/${encodeURIComponent(channel)}/${encodeURIComponent(OPENCODE_ARTIFACT)}/${distribution}?current=${encodeURIComponent(OPENCODE_VERSION)}`,
-          {
-            signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
-          },
-        ),
+        fetch("https://registry.npmjs.org/openclue/latest", {
+          signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        }),
       catch: (cause) => new Error("Failed to check for updates", { cause }),
     })
     if (!response.ok) return yield* Effect.fail(new Error(`Update check failed with status ${response.status}`))
-    const data: { version: string; metadata?: { package?: string } } = yield* Effect.tryPromise({
+    const data: { version?: string } = yield* Effect.tryPromise({
       try: () => response.json(),
       catch: (cause) => new Error("Failed to read update information", { cause }),
     })
-    if (!data.metadata?.package) return yield* Effect.fail(new Error("Update information did not include a package"))
-    return { package: data.metadata.package, version: data.version }
+    if (!data.version) return yield* Effect.fail(new Error("Update information did not include a version"))
+    return { package: "openclue", version: data.version }
   })
 
   const latest = () =>
@@ -179,6 +174,9 @@ const make = Effect.gen(function* () {
     const target = `${packageName}@${version}`
     if (installedPackage && packageName !== installedPackage && (method === "pnpm" || method === "yarn")) {
       return yield* Effect.fail(new Error(`Reinstall ${target} with ${method} to migrate from ${installedPackage}.`))
+    }
+    if (method === "curl") {
+      return yield* Effect.fail(new Error("OpenClue does not publish a curl installer. Upgrade with npm instead."))
     }
     const commands: Record<Exclude<Method, "bun" | "curl" | "brew">, string[]> = {
       // Keep the old package: uninstalling it can unlink the replacement command.
@@ -202,17 +200,6 @@ const make = Effect.gen(function* () {
           yield* fs.makeDirectory(global.cache, { recursive: true })
           const cache = yield* temporaryDirectory("update-")
           return yield* exec(["bun", "install", "--global", "--trust", "--cache-dir", cache, target], "5 minutes")
-        }
-        if (method === "curl") {
-          yield* fs.makeDirectory(global.cache, { recursive: true })
-          const directory = yield* temporaryDirectory("update-")
-          const installer = path.join(directory, "install")
-          const download = yield* exec(
-            ["curl", "-fsSL", "-o", installer, "https://opencode.ai/v2/install"],
-            "5 minutes",
-          )
-          if (download.code !== 0) return download
-          return yield* exec(["bash", installer, "--version", version, "--no-modify-path"], "5 minutes")
         }
         if (method === "brew") return yield* exec(["brew", "upgrade", packageName], "5 minutes")
         return yield* exec(commands[method], "5 minutes")
@@ -248,7 +235,7 @@ const make = Effect.gen(function* () {
       yield* Effect.logInfo("update check done", { action: "up-to-date" })
       return undefined
     }
-    yield* Effect.logInfo("OpenCode update available", { current, latest: version, action: next })
+    yield* Effect.logInfo("OpenClue update available", { current, latest: version, action: next })
     return { policy, version }
   })
 
@@ -261,7 +248,7 @@ const make = Effect.gen(function* () {
     const current = yield* Ref.get(installedVersion)
     yield* upgrade(detected, version)
     yield* Ref.set(installedVersion, version)
-    yield* Effect.logInfo("updated OpenCode", { from: current, to: version, method: detected })
+    yield* Effect.logInfo("updated OpenClue", { from: current, to: version, method: detected })
     return true
   })
 
@@ -273,7 +260,7 @@ const make = Effect.gen(function* () {
     if (OPENCODE_LOCAL)
       return {
         type: "unavailable" as const,
-        message: "This build runs from a source checkout. Use an installed OpenCode release to check for updates.",
+        message: "This build runs from a source checkout. Use an installed OpenClue release to check for updates.",
       }
     const version = yield* latest()
     if (!parseReleaseVersion(version)) return yield* Effect.fail(new Error(`Invalid version: ${version}`))

@@ -68,11 +68,11 @@ async function publishDistribution(input: {
           [input.command]: `./bin/${input.command}.exe`,
           ...(input.legacyCommand ? { [input.legacyCommand]: `./bin/${input.command}.exe` } : {}),
         },
-        ...(input.command !== input.binary ? { opencodeSourceBinary: input.binary } : {}),
+        ...(input.command !== input.binary ? { openclueSourceBinary: input.binary } : {}),
         scripts: { postinstall: "node ./postinstall.mjs" },
         version,
         license: pkg.license,
-        repository: { type: "git", url: "git+https://github.com/anomalyco/opencode.git" },
+        repository: { type: "git", url: "git+https://github.com/aisaveflower/openclue.git" },
         os: ["darwin", "linux", "win32"],
         cpu: ["arm64", "x64"],
         optionalDependencies: binaries,
@@ -84,10 +84,13 @@ async function publishDistribution(input: {
 
   await Promise.all(
     Object.entries(binaries).map(([name, version]) =>
-      publish(`${input.root}/${name.replace("@opencode/", "")}`, name, version),
+      publish(`${input.root}/${name}`, name, version),
     ),
   )
   await publish(`${input.root}/${input.name}`, input.name, version)
+  // The upstream artifact service is not part of OpenClue. Opt in only when
+  // a compatible OpenClue artifact endpoint has been configured.
+  if (process.env.OPENCLUE_UPDATE_ARTIFACT !== "1") return
   const files = await UpdateArtifact.upload({
     version,
     files: await Promise.all(
@@ -105,7 +108,7 @@ async function publishDistribution(input: {
   const artifact = {
     channel: Script.channel,
     name: input.artifact,
-    distribution: "opencode",
+    distribution: "openclue",
     version,
     metadata: { files },
   }
@@ -125,11 +128,10 @@ async function publishDistribution(input: {
 
 await publishDistribution({
   root,
-  name: pkg.name,
-  command: "opencode",
-  legacyCommand: "opencode2",
-  binary: "opencode",
-  packagePrefix: "@opencode/cli-",
+  name: "openclue",
+  command: "openclue",
+  binary: "openclue",
+  packagePrefix: "openclue-",
   artifact: "cli",
 })
 if (Script.channel !== "latest" && existsSync(path.join(root, "node"))) {
@@ -144,10 +146,14 @@ if (Script.channel !== "latest" && existsSync(path.join(root, "node"))) {
 }
 
 if (Script.channel === "latest" && Script.release && !dryRun) {
-  await $`docker buildx build --platform linux/amd64,linux/arm64 --tag ghcr.io/anomalyco/opencode:${Script.version} --push .`
+  await $`docker buildx build --platform linux/amd64,linux/arm64 --tag ghcr.io/aisaveflower/openclue:${Script.version} --push .`
 }
 
-if ((Script.channel === "beta" || Script.channel === "latest") && Script.release) {
+if (
+  (Script.channel === "beta" || Script.channel === "latest") &&
+  Script.release &&
+  process.env.OPENCLUE_PUBLISH_SYSTEM_PACKAGES === "1"
+) {
   await $`bun ./script/publish-aur.ts ${dryRun ? ["--dry-run"] : []}`.env({ ...process.env, OPENCODE_CLI_DIST: root })
   await $`bun ./script/publish-homebrew.ts ${dryRun ? ["--dry-run"] : []}`.env({
     ...process.env,

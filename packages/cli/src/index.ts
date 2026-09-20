@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import "./openclue-env"
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Effect } from "effect"
 import { Commands } from "./commands/commands"
@@ -113,7 +114,11 @@ Effect.gen(function* () {
     LayerNode.compile(LayerNode.group([Global.node, AppProcess.node, Npm.node]), {
       replacements: [
         Global.node.replace(
-          Global.layerWith(process.env.OPENCODE_CONFIG_DIR ? { config: process.env.OPENCODE_CONFIG_DIR } : {}),
+          Global.layerWith(
+            process.env.OPENCLUE_CONFIG_DIR || process.env.OPENCODE_CONFIG_DIR
+              ? { config: process.env.OPENCLUE_CONFIG_DIR ?? process.env.OPENCODE_CONFIG_DIR }
+              : {},
+          ),
         ),
       ],
     }),

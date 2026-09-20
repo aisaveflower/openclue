@@ -122,7 +122,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: github.ref_name != 'v2' && github.ref_name != 'beta'
         with:
-          name: opencode-cli
+          name: openclue-cli
           path: |
             packages/opencode/dist/opencode-darwin*
             packages/opencode/dist/opencode-linux*
@@ -130,13 +130,13 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: github.ref_name != 'v2' && github.ref_name != 'beta'
         with:
-          name: opencode-cli-windows
+          name: openclue-cli-windows
           path: packages/opencode/dist/opencode-windows*
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: opencode-preview-cli-unsigned
-          path: packages/cli/dist/cli-*
+          path: packages/cli/dist/openclue-*
 
     outputs:
       version: ${{ needs.version.outputs.version }}
@@ -168,7 +168,7 @@ jobs:
           fi
 
           found=0
-          for file in packages/cli/dist/cli-darwin-*/bin/opencode; do
+          for file in packages/cli/dist/openclue-darwin-*/bin/openclue; do
             if [ ! -f "$file" ]; then
               continue
             fi
@@ -192,7 +192,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: opencode-preview-cli-macos
-          path: packages/cli/dist/cli-*
+          path: packages/cli/dist/openclue-*
           if-no-files-found: error
 
   build-node-app-archive:
@@ -307,9 +307,9 @@ jobs:
           signing-account-name: ${{ env.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ env.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
           files: |
-            ${{ github.workspace }}\packages\cli\dist\cli-windows-arm64\bin\opencode.exe
-            ${{ github.workspace }}\packages\cli\dist\cli-windows-x64\bin\opencode.exe
-            ${{ github.workspace }}\packages\cli\dist\cli-windows-x64-baseline\bin\opencode.exe
+            ${{ github.workspace }}\packages\cli\dist\openclue-windows-arm64\bin\openclue.exe
+            ${{ github.workspace }}\packages\cli\dist\openclue-windows-x64\bin\openclue.exe
+            ${{ github.workspace }}\packages\cli\dist\openclue-windows-x64-baseline\bin\openclue.exe
           exclude-environment-credential: true
           exclude-workload-identity-credential: true
           exclude-managed-identity-credential: true
@@ -325,9 +325,9 @@ jobs:
         shell: pwsh
         run: |
           $files = @(
-            "${{ github.workspace }}\packages\cli\dist\cli-windows-arm64\bin\opencode.exe",
-            "${{ github.workspace }}\packages\cli\dist\cli-windows-x64\bin\opencode.exe",
-            "${{ github.workspace }}\packages\cli\dist\cli-windows-x64-baseline\bin\opencode.exe"
+            "${{ github.workspace }}\packages\cli\dist\openclue-windows-arm64\bin\openclue.exe",
+            "${{ github.workspace }}\packages\cli\dist\openclue-windows-x64\bin\openclue.exe",
+            "${{ github.workspace }}\packages\cli\dist\openclue-windows-x64-baseline\bin\openclue.exe"
           )
 
           foreach ($file in $files) {
@@ -340,7 +340,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: opencode-preview-cli
-          path: packages/cli/dist/cli-*
+          path: packages/cli/dist/openclue-*
           if-no-files-found: error
 
   build-electron:
@@ -573,19 +573,19 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: github.ref_name != 'v2' && github.ref_name != 'beta'
         with:
-          name: opencode-cli
+          name: openclue-cli
           path: packages/opencode/dist
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: github.ref_name != 'v2' && github.ref_name != 'beta'
         with:
-          name: opencode-cli-windows
+          name: openclue-cli-windows
           path: packages/opencode/dist
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: github.ref_name != 'v2' && github.ref_name != 'beta'
         with:
-          name: opencode-cli-signed-windows
+          name: openclue-cli-signed-windows
           path: packages/opencode/dist
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
