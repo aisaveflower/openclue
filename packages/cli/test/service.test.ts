@@ -12,11 +12,11 @@ import { ServiceRegistration } from "../src/services/service-registration"
 import { isolatedEnv } from "./fixture/environment"
 
 test("managed service ports are stable per installation channel", () => {
-  expect(ServiceConfig.defaultPort("latest")).toBe(0xc0de)
-  expect(ServiceConfig.defaultPort("dev")).toBe(0xc0de)
-  expect(ServiceConfig.defaultPort("beta")).toBe(0xc0de)
-  expect(ServiceConfig.defaultPort("next")).toBe(0xc0de)
-  expect(ServiceConfig.defaultPort("local")).toBe(0xc0df)
+  expect(ServiceConfig.defaultPort("latest")).toBe(0xc1de)
+  expect(ServiceConfig.defaultPort("dev")).toBe(0xc1de)
+  expect(ServiceConfig.defaultPort("beta")).toBe(0xc1de)
+  expect(ServiceConfig.defaultPort("next")).toBe(0xc1de)
+  expect(ServiceConfig.defaultPort("local")).toBe(0xc1df)
   expect(ServiceConfig.defaultPort("preview-a")).toBe(ServiceConfig.defaultPort("preview-a"))
   expect(ServiceConfig.defaultPort("preview-a")).not.toBe(ServiceConfig.defaultPort("preview-b"))
 })

@@ -32,9 +32,12 @@ export function filename(channel = OPENCODE_CHANNEL) {
 }
 
 export function defaultPort(channel = OPENCODE_CHANNEL) {
-  if (channel === "latest" || channel === "dev" || channel === "beta" || channel === "next") return 0xc0de
-  if (channel === "local") return 0xc0df
-  return 10_000 + (Number.parseInt(Hash.fast(channel).slice(0, 8), 16) % 50_000)
+  // OpenClue can be installed alongside OpenCode, so its managed service must
+  // not claim OpenCode's 0xc0de/0xc0df ports. Keep the channel layout while
+  // using an OpenClue-specific range and hash namespace.
+  if (channel === "latest" || channel === "dev" || channel === "beta" || channel === "next") return 0xc1de
+  if (channel === "local") return 0xc1df
+  return 10_000 + (Number.parseInt(Hash.fast(`openclue:${channel}`).slice(0, 8), 16) % 50_000)
 }
 
 export function legacyFilename(channel = OPENCODE_CHANNEL) {
