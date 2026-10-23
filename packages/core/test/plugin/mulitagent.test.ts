@@ -37,6 +37,12 @@ describe("MulitagentPlugin", () => {
     expect(MulitagentPlugin.parsePaths("not json", 4)).toHaveLength(4)
   })
 
+  test("cleans candidate worktrees only after successful parent execution", () => {
+    expect(MulitagentPlugin.shouldCleanupCandidates({ type: "session.execution.succeeded" })).toBe(true)
+    expect(MulitagentPlugin.shouldCleanupCandidates({ type: "session.execution.failed" })).toBe(false)
+    expect(MulitagentPlugin.shouldCleanupCandidates({ type: "session.execution.interrupted" })).toBe(false)
+  })
+
   test("registers an automatic primary agent and implementation worker", async () => {
     const agents = new Map<Agent.ID, Types.DeepMutable<Agent.Info>>()
     await Effect.runPromise(

@@ -98,6 +98,15 @@ function diffText(
   return reportText(output || "[no file changes detected]")
 }
 
+type ParentExecution =
+  | SessionEvent.Execution.Succeeded
+  | SessionEvent.Execution.Failed
+  | SessionEvent.Execution.Interrupted
+
+export function shouldCleanupCandidates(event: Pick<ParentExecution, "type">) {
+  return event.type === "session.execution.succeeded"
+}
+
 export const Plugin = define({
   id: "openclue.mulitagent",
   effect: Effect.fn("MulitagentPlugin")(function* (ctx) {
@@ -267,6 +276,11 @@ export const Plugin = define({
       Stream.runForEach((event) => {
         const worktrees = candidates.get(event.data.sessionID)
         if (!worktrees) return Effect.void
+        if (!shouldCleanupCandidates(event))
+          return Effect.logWarning("preserving Mulitagent candidate worktrees after parent execution did not succeed", {
+            sessionID: event.data.sessionID,
+            directories: worktrees.map((worktree) => worktree.directory),
+          })
         candidates.delete(event.data.sessionID)
         return Effect.forEach(
           worktrees,
